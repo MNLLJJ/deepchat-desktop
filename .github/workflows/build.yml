@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -106,5 +109,5 @@ jobs:
                -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) \
             -print0 | while IFS= read -r -d '' f; do
               echo "uploading: $f"
-              gh release upload "${GITHUB_REF_NAME}" "$f" --clobber || echo "upload failed: $f"
+              gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
           done

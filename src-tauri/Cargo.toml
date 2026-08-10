@@ -2,7 +2,7 @@
 name = "deepchat-desktop"
 version = "1.0.0"
 description = "chat.deepseek.com 网页端桌面应用（Tauri 2）"
-authors = ["deepchat-desktop contributors"]
+authors = ["MNLLJJ"]
 edition = "2021"
 
 # 静态库/动态库/普通库三种产物，供不同构建方式使用（Tauri 2 标准配置）

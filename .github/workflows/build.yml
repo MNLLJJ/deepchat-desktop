@@ -97,6 +97,7 @@ jobs:
 
       - name: Upload to GitHub Release (tag builds)
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

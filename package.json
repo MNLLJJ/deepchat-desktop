@@ -1,0 +1,15 @@
+{
+  "name": "deepchat-desktop",
+  "version": "1.0.0",
+  "description": "chat.deepseek.com 网页端桌面应用（Tauri 2）",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

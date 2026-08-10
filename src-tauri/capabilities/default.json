@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认能力（含核心、窗口、WebView、事件权限；允许 chat.deepseek.com 远程 IPC 以驱动会话持久化）",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://chat.deepseek.com", "https://api.deepseek.com"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:event:default",
+    "allow-save-session",
+    "allow-load-session",
+    "allow-clear-session",
+    "allow-debug-log",
+    "allow-open-external"
+  ]
+}

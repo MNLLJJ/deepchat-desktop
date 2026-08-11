@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-all-cookies"
+description = "Enables the restore_all_cookies command without any pre-configured scope."
+commands.allow = ["restore_all_cookies"]
+
+[[permission]]
+identifier = "deny-restore-all-cookies"
+description = "Denies the restore_all_cookies command without any pre-configured scope."
+commands.deny = ["restore_all_cookies"]

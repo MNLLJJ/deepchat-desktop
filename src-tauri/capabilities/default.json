@@ -4,7 +4,10 @@
   "description": "主窗口默认能力（含核心、窗口、WebView、事件权限；允许 chat.deepseek.com 远程 IPC 以驱动会话持久化）",
   "windows": ["main"],
   "remote": {
-    "urls": ["https://chat.deepseek.com", "https://api.deepseek.com"]
+    "urls": [
+      "https://deepseek.com",
+      "https://*.deepseek.com"
+    ]
   },
   "permissions": [
     "core:default",

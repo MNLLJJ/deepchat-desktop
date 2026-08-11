@@ -12,13 +12,25 @@
     var UA = navigator.userAgent || "";
     var CHROME = /Chrome\/(\d+)/.exec(UA);
     if (!CHROME) return; // 非 Chrome UA 时不处理
-    var major = CHROME[1];
+    var major = CHROME[1]; // 自动跟随 lib.rs 的 UA（DS_UA_VERSION 可覆盖），无需单独维护
     var isEdge = UA.indexOf("Edg/") >= 0;
 
     // 平台判定（与 lib.rs 中的 UA 模板保持一致）
     var platform = "Linux";
     if (UA.indexOf("Windows") >= 0) platform = "Windows";
     else if (UA.indexOf("Macintosh") >= 0) platform = "macOS";
+
+    // —— 高熵指纹常量（P0-2 集中管理；如需调整与 lib.rs 的 UA 一起升级）——
+    // architecture：按 x86_64 主流值返回；Apple Silicon / ARM Windows 上如被高熵检测识破，
+    //   再按 navigator.hardwareConcurrency 等推导，此处保持简单。
+    var FP_ARCH = "x86";
+    var FP_BITNESS = "64";
+    // UA-CH 的 platformVersion：Windows 10/11 恒为 15.x；macOS 对应当前大版本。
+    var FP_PLATFORM_VERSION = {
+      Windows: "15.0.0",
+      macOS: "15.0",
+      Linux: "6.0",
+    };
 
     // 品牌列表：Edge/Chrome 各自真实的 UA-CH 品牌序列
     var brands = isEdge
@@ -132,19 +144,14 @@
                 { brand: brands[2].brand, version: "8.0.0.0" },
               ];
               var out = {
-                architecture: platform === "macOS" ? "x86" : "x86",
-                bitness: "64",
+                architecture: FP_ARCH,
+                bitness: FP_BITNESS,
                 brands: brands,
                 fullVersionList: fullVersionList,
                 mobile: false,
                 model: "",
                 platform: platform,
-                platformVersion:
-                  platform === "Windows"
-                    ? "15.0.0"
-                    : platform === "macOS"
-                      ? "15.0"
-                      : "6.0",
+                platformVersion: FP_PLATFORM_VERSION[platform] || "0",
                 uaFullVersion: major + ".0.0.0",
                 wow64: false,
               };

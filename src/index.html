@@ -51,19 +51,130 @@
           transform: rotate(360deg);
         }
       }
+      /* ---- 离线/加载失败错误页 ---- */
+      .offline {
+        color: #555;
+      }
+      @media (prefers-color-scheme: dark) {
+        .offline {
+          color: #bbb;
+        }
+      }
+      .offline .mark {
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 34px;
+        font-weight: 700;
+        background: rgba(77, 107, 254, 0.12);
+        color: #4d6bfe;
+      }
+      .offline h1 {
+        font-size: 18px;
+        font-weight: 600;
+        color: inherit;
+      }
+      .offline .status {
+        max-width: 420px;
+        text-align: center;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #888;
+        min-height: 42px;
+      }
+      .offline button {
+        margin-top: 6px;
+        padding: 9px 34px;
+        font-size: 14px;
+        color: #fff;
+        background: #4d6bfe;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .offline button:hover {
+        background: #3f5ce6;
+      }
+      .offline button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
     </style>
-    <script>
-      // 主窗口实际加载的是 https://chat.deepseek.com，
-      // 该页面仅作为本地前端资源占位（frontendDist），正常情况下不会展示。
-      setTimeout(() => {
-        location.replace("https://chat.deepseek.com");
-      }, 0);
-    </script>
   </head>
   <body>
-    <div class="launch">
+    <!-- 正常启动占位：主窗口实际加载的是 https://chat.deepseek.com -->
+    <div id="launch" class="launch">
       <div class="spinner"></div>
       <p>正在启动 DeepChat…</p>
     </div>
+
+    <!-- 离线 / 加载失败错误页（由 Rust 看门狗在页面长时间加载失败时导航到 ?offline=1） -->
+    <div id="offline" class="launch offline" style="display: none">
+      <div class="mark">!</div>
+      <h1>无法连接到 chat.deepseek.com</h1>
+      <p id="status" class="status">正在检查网络…</p>
+      <button id="retry" type="button">重试</button>
+    </div>
+
+    <script>
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var offline = params.get("offline") === "1";
+
+        // 正常模式：跳转远程站点（主窗口实际加载页）
+        if (!offline) {
+          setTimeout(function () {
+            location.replace("https://chat.deepseek.com");
+          }, 0);
+          return;
+        }
+
+        // ---- 错误页模式：检测网络，恢复后自动跳回 ----
+        document.getElementById("launch").style.display = "none";
+        document.getElementById("offline").style.display = "flex";
+
+        var statusEl = document.getElementById("status");
+        var retryBtn = document.getElementById("retry");
+        var checking = false;
+
+        function checkAndRetry() {
+          if (checking) return;
+          checking = true;
+          retryBtn.disabled = true;
+          statusEl.textContent = "正在检查网络…";
+          var ctrl = new AbortController();
+          var timer = setTimeout(function () {
+            ctrl.abort();
+          }, 6000);
+          // no-cors HEAD：只关心"网络是否可达"，不关心响应体
+          fetch("https://chat.deepseek.com", {
+            method: "HEAD",
+            mode: "no-cors",
+            cache: "no-store",
+            signal: ctrl.signal,
+          })
+            .then(function () {
+              clearTimeout(timer);
+              statusEl.textContent = "网络已恢复，正在连接…";
+              location.href = "https://chat.deepseek.com";
+            })
+            .catch(function () {
+              clearTimeout(timer);
+              checking = false;
+              retryBtn.disabled = false;
+              statusEl.textContent =
+                "当前无法访问网络或服务暂时不可用，请检查网络连接后点击重试。";
+            });
+        }
+
+        retryBtn.addEventListener("click", checkAndRetry);
+        checkAndRetry();
+        // 每 15 秒自动探测一次，网络恢复后自动跳回
+        setInterval(checkAndRetry, 15000);
+      })();
+    </script>
   </body>
 </html>

@@ -9,10 +9,14 @@
 - **登录态持久化**（双保险）：
   1. **原生 WebView 存储** —— macOS 默认使用 `WKWebsiteDataStore.defaultDataStore()`（持久化），Windows WebView2 自动持久化到用户配置目录。HttpOnly Cookie 由这一层负责
   2. **本地文件快照** —— `init.js` 定期将 Cookie + localStorage 同步到 `app_data_dir/session.json`，启动时恢复。覆盖原生存储被清理、换构建、系统清理等极端场景
+- **可选能力**（Cargo feature 按需启用，默认构建体积不变）：
+  - `full-cookie-snapshot` —— 通过原生接口全量读写 HttpOnly Cookie（Windows WebView2 CookieManager / macOS WKHTTPCookieStore），原生存储丢失后登录态也可完整恢复；`init.js` 运行时探测，未启用时自动回退 `document.cookie`
+  - `encrypt-session` —— 会话快照落盘加密（Windows DPAPI / macOS Keychain + AES-256-GCM），旧明文快照自动兼容
 - **窗口配置**：默认 1280×800，最小 1000×600，自由缩放
+- **单实例保护**：只允许一个实例运行；重复启动时自动唤起并聚焦已有窗口（Windows 上避免多进程争用 WebView2 profile 锁导致的卡顿/白屏）
 - **链接处理**：
   - 应用内（`*.deepseek.com`）的链接在应用内打开
-  - 外部链接（含 OAuth 提供方、文档站、GitHub 等）自动跳转系统默认浏览器
+  - 外部链接（含 OAuth 提供方、文档站、GitHub 等）自动跳转系统默认浏览器（Windows 走 ShellExecuteW，不依赖 PowerShell）
   - `window.open` 与 `target="_blank` 已重定向/拦截
 - **CORS / 跨域**：窗口直接加载 `https://chat.deepseek.com`，保持同源；不会触发 CORS 拦截；CORS 同源策略天然避免
 - **跨平台**：macOS 10.15+ 与 Windows 10/11（需 WebView2 Runtime，已内置）
@@ -21,6 +25,8 @@
 ## 桌面环境兼容说明
 
 chat.deepseek.com 对非标准浏览器环境（如 Electron、Tauri WebView）有客户端校验，命中会提示“使用环境异常”。本应用通过 `src-tauri/src/lib.rs` 设置标准 Edge UA，并在 `document_start` 注入 `src-tauri/assets/spoof.js` 适配浏览器运行时特征，以通过该校验、正常使用全部功能。
+
+UA 的 Chrome/Edge 版本号集中管理（`lib.rs` 中 `DEFAULT_UA_VERSION`，`spoof.js` 自动跟随），若站点校验升级导致失效，可用 `DS_UA_VERSION=140 cargo build` 覆盖版本号重新构建。
 
 > ⚠️ 免责声明：本项目是 Web 桌面壳（WebView wrapper）的通用适配实践，不包含对 chat.deepseek.com 服务或数据的任何破解、篡改。使用本应用前，请阅读并遵守 [chat.deepseek.com](https://chat.deepseek.com) 的服务条款，因违规使用产生的影响由使用者自行承担。
 
@@ -158,19 +164,20 @@ document.addEventListener('click', e => {
 ```json
 {
   "windows": ["main"],
-  "remote": { "urls": ["https://chat.deepseek.com", "https://api.deepseek.com"] },
+  "remote": { "urls": ["https://deepseek.com", "https://*.deepseek.com"] },
   "permissions": ["core:default", "core:window:default", "core:webview:default", "core:event:default"]
 }
 ```
 
-这是 init.js 能从 chat.deepseek.com 调用 `save_session` / `load_session` 的前提。仅信任 deepseek 主域，未授权的远程域完全无法访问 IPC。
+这是 init.js 能从 deepseek 页面调用 `save_session` / `load_session` 的前提。白名单覆盖全部 `*.deepseek.com` 子域（含登录 / OAuth 跳转域），未授权的远程域完全无法访问 IPC。
 
 ## 已知限制
 
 - **OAuth / 第三方登录**：如果 DeepSeek 引入外部 OAuth（目前主要是手机号/邮箱 + 验证码），外部授权页因 `on_navigation` 的 http/https 放行保留在应用内（与系统浏览器打开会中断回调）。如需外部跳转，扩展 `on_navigation` 屏蔽规则
 - **文件下载**：Tauri 2 当前对 WebView 下载的接管有限；WKWebView 下载事件默认静默，WebView2 走系统下载目录。如需自定义保存对话框，监听 `WebviewDownloadEvent`（需要 Tauri 主线 nightly/next 编译选项）
 - **会话文件大小**：单值 > 512KB 或总快照 > 8MB 会被忽略（init.js 跳过）；超大会触发 `save_session` 拒绝
-- **macOS 上 HttpOnly Cookie**：依赖原生 WebView 存储的持久化。如果用户手动清空 WebKit 网站数据，原生 Cookie 会丢失但文件快照仍可恢复部分（仅 JS 可见的 Cookie）。最坏情况是要求重新登录
+- **HttpOnly Cookie 依赖原生 WebView 存储**：文件快照只能读写 JS 可见的 Cookie（`document.cookie`），登录态核心的 HttpOnly Cookie 由原生 WebView 存储承载（macOS WKWebView dataStore / Windows WebView2 profile）。若用户手动清空网站数据，或 Windows 上 WebView2 profile 因异常退出损坏/丢失，HttpOnly Cookie 将无法从文件快照恢复，需要重新登录（快照仍可恢复部分 localStorage 与会话数据）
+- **Windows 异常退出**：强杀进程 / 断电可能导致 WebView2 profile 锁残留或损坏，下次启动偶发长时间白屏。应用已内置加载看门狗（约 20s 未加载完成自动刷新，最多 2 次）与快照防污染机制（未登录中间态不会覆盖已登录快照）缓解该问题
 
 ## 许可与声明
 

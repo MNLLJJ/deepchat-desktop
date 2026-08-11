@@ -1,6 +1,6 @@
 [package]
 name = "deepchat-desktop"
-version = "1.0.0"
+version = "1.0.1"
 description = "chat.deepseek.com 网页端桌面应用（Tauri 2）"
 authors = ["MNLLJJ"]
 edition = "2021"
@@ -13,11 +13,58 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+# 会话快照加密：Windows 用 DPAPI（当前用户上下文），macOS 用 Keychain + AES-256-GCM。
+# 开启后 session.json 内容以 "DSENC1:" 前缀密文存储；旧明文快照仍可读取（向后兼容）。
+encrypt-session = ["dep:aes-gcm", "dep:rand", "dep:security-framework", "dep:windows"]
+# HttpOnly Cookie 全量快照：Windows 走 WebView2 CookieManager、macOS 走 WKHTTPCookieStore，
+# 把原生 WebView 存储中的 HttpOnly 登录 Cookie 也纳入文件快照，登录态在原生存储丢失后可完整恢复。
+full-cookie-snapshot = [
+    "dep:windows",
+    "dep:webview2-com",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-web-kit",
+    "dep:block2",
+]
+
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon：启用菜单栏（托盘）图标支持；image-png：支持从 PNG 字节解码托盘图标
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# 单实例锁：阻止多开（Windows 多进程争用 WebView2 profile 锁会导致白屏/转圈），
+# 二次启动时唤起已有窗口并聚焦
+tauri-plugin-single-instance = "2"
+# 跨平台打开外部链接（Windows 内部走 ShellExecuteW，替代启动 PowerShell 进程）
+open = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# 会话快照加密（仅 encrypt-session feature 启用）
+aes-gcm = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS Keychain 密钥存储（仅 encrypt-session feature 启用）
+security-framework = { version = "2", optional = true }
+# WKHTTPCookieStore 全量 Cookie 读写（仅 full-cookie-snapshot feature 启用；
+# 与 tauri/wry 内部使用版本一致）
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-web-kit = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows DPAPI 加密（Win32_Security_Cryptography，encrypt-session）：
+# 当前用户上下文加密，无需额外密钥存储。
+windows = { version = "0.61", features = [
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_Foundation",
+], optional = true }
+# WebView2 COM 绑定（与 tauri/wry 内部同版本 0.38，full-cookie-snapshot）：
+# 通过 CookieManager 全量读写 HttpOnly Cookie。
+webview2-com = { version = "0.38", optional = true }
 
 [profile.release]
 codegen-units = 1

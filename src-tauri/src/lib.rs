@@ -330,7 +330,8 @@ pub fn run() {
                 hide_main_window(app);
             }
         }
-        // macOS：点击 Dock 图标时恢复主窗口
+        // macOS：点击 Dock 图标时恢复主窗口（该事件仅 macOS 存在，须按平台隔离）
+        #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             show_main_window(app);
         }

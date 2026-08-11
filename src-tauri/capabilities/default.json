@@ -18,6 +18,8 @@
     "allow-load-session",
     "allow-clear-session",
     "allow-debug-log",
-    "allow-open-external"
+    "allow-open-external",
+    "allow-dump-all-cookies",
+    "allow-restore-all-cookies"
   ]
 }

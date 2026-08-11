@@ -75,5 +75,85 @@
         " url=" +
         location.href,
     }).catch(function () {});
+    // Feature 验证：dump_all_cookies（async 命令）在 macOS 是否真正工作
+    INVOKE("dump_all_cookies")
+      .then(function (list) {
+        var httpOnly = 0;
+        var names = [];
+        if (Array.isArray(list)) {
+          for (var i = 0; i < list.length; i++) {
+            names.push(list[i].name + (list[i].http_only ? "(HttpOnly)" : ""));
+            if (list[i].http_only) httpOnly++;
+          }
+        }
+        return INVOKE("debug_log", {
+          msg:
+            "selftest-dump OK count=" +
+            (Array.isArray(list) ? list.length : -1) +
+            " httpOnly=" +
+            httpOnly +
+            " names=" +
+            names.join(","),
+        }).catch(function () {});
+      })
+      .catch(function (e) {
+        return INVOKE("debug_log", {
+          msg: "selftest-dump FAIL err=" + String(e),
+        }).catch(function () {});
+      });
+    // Feature 验证：restore_all_cookies（dump 后原样恢复，验证写入链路）
+    INVOKE("dump_all_cookies")
+      .then(function (list) {
+        if (!Array.isArray(list)) return null;
+        return INVOKE("restore_all_cookies", { cookies: list })
+          .then(function () {
+            return INVOKE("dump_all_cookies").then(function (list2) {
+              var same =
+                Array.isArray(list2) && list2.length === list.length;
+              return INVOKE("debug_log", {
+                msg:
+                  "selftest-restore OK count=" +
+                  list.length +
+                  " afterDump=" +
+                  (Array.isArray(list2) ? list2.length : -1) +
+                  " same=" +
+                  same,
+              }).catch(function () {});
+            });
+          })
+          .catch(function (e) {
+            return INVOKE("debug_log", {
+              msg: "selftest-restore FAIL err=" + String(e),
+            }).catch(function () {});
+          });
+      })
+      .catch(function () {});
+    // Feature 验证：快照文件中 cookiesFull 已持久化（encrypt-session 解密后可读）
+    setTimeout(function () {
+      INVOKE("load_session")
+        .then(function (snapStr) {
+          var hasFull = false;
+          var fullLen = -1;
+          try {
+            var snap = JSON.parse(snapStr || "null");
+            hasFull = snap && Array.isArray(snap.cookiesFull);
+            fullLen = hasFull ? snap.cookiesFull.length : -1;
+          } catch (e) {}
+          return INVOKE("debug_log", {
+            msg:
+              "selftest-snapshot cookiesFull=" +
+              hasFull +
+              " len=" +
+              fullLen +
+              " keys=" +
+              (snapStr ? Object.keys(JSON.parse(snapStr)).join(",") : "none"),
+          }).catch(function () {});
+        })
+        .catch(function (e) {
+          return INVOKE("debug_log", {
+            msg: "selftest-snapshot FAIL err=" + String(e),
+          }).catch(function () {});
+        });
+    }, 8000);
   } catch (e) {}
 })();

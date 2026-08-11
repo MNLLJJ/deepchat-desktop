@@ -50,23 +50,26 @@ mod cipher {
     pub const MAGIC: &str = "DSENC1:";
 
     // ---------- Windows：DPAPI（当前用户上下文加密，无需额外密钥存储） ----------
+    // 注意：windows crate 0.61 中 `DATA_BLOB` 更名为 `CRYPT_INTEGER_BLOB`，
+    // `LocalFree` 位于 `Win32::Foundation`（原 `System::Memory`），
+    // `CryptUnprotectData` 第 2 参为 `Option<*mut PWSTR>`（传 None）。
     #[cfg(target_os = "windows")]
     pub fn encrypt(data: &[u8]) -> Result<Vec<u8>, String> {
-        use windows::core::PWSTR;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
         use windows::Win32::Security::Cryptography::{
-            CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+            CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
-        use windows::Win32::System::Memory::LocalFree;
 
-        let mut input = DATA_BLOB {
+        let input = CRYPT_INTEGER_BLOB {
             cbData: data.len() as u32,
             pbData: data.as_ptr() as *mut u8,
         };
-        let mut output = DATA_BLOB::default();
+        let mut output = CRYPT_INTEGER_BLOB::default();
         unsafe {
             CryptProtectData(
                 &input,
-                PWSTR::null(),
+                PCWSTR::null(),
                 None,
                 None,
                 None,
@@ -78,28 +81,27 @@ mod cipher {
         let bytes =
             unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
         unsafe {
-            let _ = LocalFree(output.pbData as _);
+            let _ = LocalFree(Some(HLOCAL(output.pbData as *mut core::ffi::c_void)));
         }
         Ok(bytes)
     }
 
     #[cfg(target_os = "windows")]
     pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
-        use windows::core::PWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
         use windows::Win32::Security::Cryptography::{
-            CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+            CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
-        use windows::Win32::System::Memory::LocalFree;
 
-        let mut input = DATA_BLOB {
+        let input = CRYPT_INTEGER_BLOB {
             cbData: data.len() as u32,
             pbData: data.as_ptr() as *mut u8,
         };
-        let mut output = DATA_BLOB::default();
+        let mut output = CRYPT_INTEGER_BLOB::default();
         unsafe {
             CryptUnprotectData(
                 &input,
-                PWSTR::null(),
+                None,
                 None,
                 None,
                 None,
@@ -111,7 +113,7 @@ mod cipher {
         let bytes =
             unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
         unsafe {
-            let _ = LocalFree(output.pbData as _);
+            let _ = LocalFree(Some(HLOCAL(output.pbData as *mut core::ffi::c_void)));
         }
         Ok(bytes)
     }
@@ -342,23 +344,31 @@ pub struct CookieData {
     pub expires: f64,
 }
 
-// ---------- Windows：WebView2 CookieManager（webview2-com，与 tauri/wry 同版本） ----------
-// 注意：COM 完成回调在 WebView2 UI 线程（Tauri 主线程消息循环）执行，
-// 因此这里采用"with_webview 回调内注册、外层 channel 等待"模式，避免死锁。
+// ---------- Windows：WebView2 CookieManager（webview2-com 0.38，与 tauri/wry 同版本） ----------
+// 实现要点（对照 wry 0.55 同版本参考实现）：
+// 1. CookieManager 通过 `ICoreWebView2_2::CookieManager()` 获取（0.38 中方法名是 CookieManager，
+//    不是 GetCookieManager；旧版代码用的 GetCookiesAsync 也已在 0.38 更名为 GetCookies）。
+// 2. Cookie 属性读写均为 out 参数形式（Name/Value/Domain/Path/IsHttpOnly/IsSecure/IsSession/Expires），
+//    属性设置方法为 SetIsHttpOnly(bool)/SetIsSecure(bool)/SetExpires(f64)。
+// 3. AddOrUpdateCookie 在 0.38 中是同步方法（无完成回调），restore 无需等待。
+// 4. GetCookies 是异步的：完成回调投递到创建 WebView2 的 UI 线程（Tauri 主线程）消息泵。
+//    因此 dump 绝不能作为 sync 命令在主线程执行 —— 那会发生在 WebView2 事件处理器
+//    （WebMessageReceived）调用栈内，等待回调构成"嵌套消息循环"触发 WebView2 不支持的重入，
+//    回调永远不会到达（实测挂起）。正确模式（见命令包装层）：async 命令 + spawn_blocking，
+//    with_webview 闭包被投递到空闲的主线程执行并注册 GetCookies，WebView2 回调由主线程
+//    消息泵正常投递，blocking 线程用普通 recv_timeout 收结果。
 #[cfg(all(feature = "full-cookie-snapshot", target_os = "windows"))]
 mod win_cookie {
-    use std::cell::RefCell;
     use std::sync::mpsc;
     use std::time::Duration;
 
     use tauri::Webview;
+    use webview2_com::GetCookiesCompletedHandler;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2AddOrUpdateCookieCompletedHandler, ICoreWebView2Cookie,
-        ICoreWebView2CookieList, ICoreWebView2CookieManager,
+        ICoreWebView2Cookie, ICoreWebView2CookieList, ICoreWebView2_2,
         ICoreWebView2GetCookiesCompletedHandler,
     };
-    use windows::core::{implement, Error, HSTRING, PCWSTR, PWSTR};
-    use windows::Win32::Foundation::BOOL;
+    use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 
     use super::CookieData;
 
@@ -370,66 +380,50 @@ mod win_cookie {
     }
 
     fn cookie_to_data(cookie: &ICoreWebView2Cookie) -> Result<CookieData, String> {
+        use windows::core::BOOL;
         unsafe {
+            let mut name = PWSTR::null();
+            let mut value = PWSTR::null();
+            let mut domain = PWSTR::null();
+            let mut path = PWSTR::null();
+            let mut http_only: BOOL = false.into();
+            let mut secure: BOOL = false.into();
+            let mut session: BOOL = false.into();
+            let mut expires = 0.0f64;
+            cookie
+                .Name(&mut name)
+                .map_err(|e| format!("读 Cookie Name 失败: {e}"))?;
+            cookie
+                .Value(&mut value)
+                .map_err(|e| format!("读 Cookie Value 失败: {e}"))?;
+            cookie
+                .Domain(&mut domain)
+                .map_err(|e| format!("读 Cookie Domain 失败: {e}"))?;
+            cookie
+                .Path(&mut path)
+                .map_err(|e| format!("读 Cookie Path 失败: {e}"))?;
+            cookie
+                .IsHttpOnly(&mut http_only)
+                .map_err(|e| format!("读 Cookie HttpOnly 失败: {e}"))?;
+            cookie
+                .IsSecure(&mut secure)
+                .map_err(|e| format!("读 Cookie Secure 失败: {e}"))?;
+            cookie
+                .IsSession(&mut session)
+                .map_err(|e| format!("读 Cookie Session 失败: {e}"))?;
+            cookie
+                .Expires(&mut expires)
+                .map_err(|e| format!("读 Cookie Expires 失败: {e}"))?;
             Ok(CookieData {
-                name: pwstr(cookie.Name().map_err(|e| format!("读 Cookie Name 失败: {e}"))?),
-                value: pwstr(cookie.Value().map_err(|e| format!("读 Cookie Value 失败: {e}"))?),
-                domain: pwstr(cookie.Domain().map_err(|e| format!("读 Cookie Domain 失败: {e}"))?),
-                path: pwstr(cookie.Path().map_err(|e| format!("读 Cookie Path 失败: {e}"))?),
-                http_only: cookie
-                    .IsHttpOnly()
-                    .map_err(|e| format!("读 Cookie HttpOnly 失败: {e}"))?
-                    .as_bool(),
-                secure: cookie
-                    .IsSecure()
-                    .map_err(|e| format!("读 Cookie Secure 失败: {e}"))?
-                    .as_bool(),
-                session: cookie
-                    .IsSession()
-                    .map_err(|e| format!("读 Cookie Session 失败: {e}"))?
-                    .as_bool(),
-                expires: cookie
-                    .Expires()
-                    .map_err(|e| format!("读 Cookie Expires 失败: {e}"))?,
+                name: pwstr(name),
+                value: pwstr(value),
+                domain: pwstr(domain),
+                path: pwstr(path),
+                http_only: http_only.as_bool(),
+                secure: secure.as_bool(),
+                session: session.as_bool(),
+                expires,
             })
-        }
-    }
-
-    // 完成回调：GetCookiesAsync(uri, handler) —— handler.Invoke(errorCode, cookieList)
-    #[implement(ICoreWebView2GetCookiesCompletedHandler)]
-    struct GetCookiesHandler(RefCell<Option<mpsc::Sender<Vec<CookieData>>>>);
-
-    impl ICoreWebView2GetCookiesCompletedHandler_Impl for GetCookiesHandler {
-        fn Invoke(
-            &self,
-            _error: Option<&Error>,
-            result: Option<&ICoreWebView2CookieList>,
-        ) -> windows::core::Result<()> {
-            let mut cookies = Vec::new();
-            if let Some(list) = result {
-                let count = unsafe { list.Count() }?;
-                for i in 0..count {
-                    let cookie = unsafe { list.GetValueAtIndex(i) }?;
-                    cookies.push(cookie_to_data(&cookie).unwrap_or_default());
-                }
-            }
-            if let Some(tx) = self.0.borrow_mut().take() {
-                let _ = tx.send(cookies);
-            }
-            Ok(())
-        }
-    }
-
-    // 完成回调：AddOrUpdateCookie(cookie, handler) —— handler.Invoke(errorCode)
-    #[implement(ICoreWebView2AddOrUpdateCookieCompletedHandler)]
-    struct AddCookieHandler(RefCell<Option<mpsc::Sender<()>>>);
-
-    impl ICoreWebView2AddOrUpdateCookieCompletedHandler_Impl for AddCookieHandler {
-        fn Invoke(&self, _error: Option<&Error>) -> windows::core::Result<()> {
-            if let Some(tx) = self.0.borrow_mut().take() {
-                let _ = tx.send(());
-            }
-            Ok(())
         }
     }
 
@@ -438,29 +432,57 @@ mod win_cookie {
         let tx2 = tx.clone();
         webview
             .with_webview(move |pw| {
-                let manager = (|| -> Result<ICoreWebView2CookieManager, String> {
+                let result = (|| -> Result<(), String> {
                     let core = unsafe { pw.controller().CoreWebView2() }
                         .map_err(|e| format!("获取 CoreWebView2 失败: {e}"))?;
-                    unsafe { core.GetCookieManager() }
-                        .map_err(|e| format!("获取 CookieManager 失败: {e}"))
+                    // CookieManager() 是 ICoreWebView2_2 及以上接口的方法（0.38 bindings）
+                    let core2 = core
+                        .cast::<ICoreWebView2_2>()
+                        .map_err(|e| format!("获取 ICoreWebView2_2 失败: {e}"))?;
+                    let manager = unsafe { core2.CookieManager() }
+                        .map_err(|e| format!("获取 CookieManager 失败: {e}"))?;
+                    let uri = HSTRING::from("https://chat.deepseek.com");
+                    let handler: ICoreWebView2GetCookiesCompletedHandler =
+                        GetCookiesCompletedHandler::create(Box::new(
+                            // 宏约定:HRESULT 参数自动转为 windows::core::Result<()>
+                            move |error_code: windows::core::Result<()>,
+                                  cookies: Option<ICoreWebView2CookieList>|
+                             -> windows::core::Result<()> {
+                                let r = (move || -> Result<Vec<CookieData>, String> {
+                                    error_code
+                                        .map_err(|e| format!("GetCookies 失败: {e}"))?;
+                                    let mut out = Vec::new();
+                                    if let Some(list) = cookies {
+                                        let mut count = 0u32;
+                                        unsafe { list.Count(&mut count) }
+                                            .map_err(|e| format!("读 Cookie 数量失败: {e}"))?;
+                                        for i in 0..count {
+                                            let cookie = unsafe { list.GetValueAtIndex(i) }
+                                                .map_err(|e| format!("读 Cookie 失败: {e}"))?;
+                                            out.push(cookie_to_data(&cookie)?);
+                                        }
+                                    }
+                                    Ok(out)
+                                })();
+                                let _ = tx2.send(r);
+                                Ok(())
+                            },
+                        ));
+                    unsafe { manager.GetCookies(PCWSTR(uri.as_ptr()), &handler) }
+                        .map_err(|e| format!("GetCookies 失败: {e}"))?;
+                    Ok(())
                 })();
-                match manager {
-                    Ok(manager) => {
-                        let handler: ICoreWebView2GetCookiesCompletedHandler =
-                            GetCookiesHandler(RefCell::new(Some(tx2))).into();
-                        let uri = HSTRING::from("https://chat.deepseek.com");
-                        if let Err(e) = unsafe {
-                            manager.GetCookiesAsync(PCWSTR(uri.as_ptr()), &handler)
-                        } {
-                            let _ = tx.send(Err(format!("GetCookiesAsync 失败: {e}")));
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
+                if let Err(e) = result {
+                    let _ = tx.send(Err(e));
                 }
             })
             .map_err(|e| format!("with_webview 失败: {e}"))?;
+
+        // 等待回调。本函数由命令包装层（dump_all_cookies 命令）的 spawn_blocking 线程调用：
+        // with_webview 闭包会被投递到主线程执行（注册 GetCookies），WebView2 完成回调由
+        // 空闲的主线程消息泵投递并触发 handler 发送 channel，这里普通 recv 即可。
+        // 注意：绝不能在主线程（sync 命令）直接等待——那是在 WebView2 事件处理器栈内
+        // 启动嵌套消息循环，触发 WebView2 不支持的重入，回调永远不会到达（实测挂起）。
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(cookies)) => Ok(cookies),
             Ok(Err(e)) => Err(e),
@@ -470,78 +492,48 @@ mod win_cookie {
 
     pub fn restore_all_cookies(webview: &Webview, cookies: Vec<CookieData>) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
-        let total = cookies.len();
-        let tx_count = tx.clone();
         webview
             .with_webview(move |pw| {
-                let manager = (|| -> Result<ICoreWebView2CookieManager, String> {
+                let result = (|| -> Result<(), String> {
                     let core = unsafe { pw.controller().CoreWebView2() }
                         .map_err(|e| format!("获取 CoreWebView2 失败: {e}"))?;
-                    unsafe { core.GetCookieManager() }
-                        .map_err(|e| format!("获取 CookieManager 失败: {e}"))
-                })();
-                let manager = match manager {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                        return;
-                    }
-                };
-                for c in cookies {
-                    let name = HSTRING::from(c.name.as_str());
-                    let value = HSTRING::from(c.value.as_str());
-                    let domain = HSTRING::from(c.domain.as_str());
-                    let path = HSTRING::from(c.path.as_str());
-                    let cookie = match unsafe {
-                        manager.CreateCookie(
-                            PCWSTR(name.as_ptr()),
-                            PCWSTR(value.as_ptr()),
-                            PCWSTR(domain.as_ptr()),
-                            PCWSTR(path.as_ptr()),
-                        )
-                    } {
-                        Ok(c) => c,
-                        Err(e) => {
-                            let _ = tx.send(Err(format!("CreateCookie 失败 ({}): {e}", c.name)));
-                            return;
+                    // CookieManager() 是 ICoreWebView2_2 及以上接口的方法（0.38 bindings）
+                    let core2 = core
+                        .cast::<ICoreWebView2_2>()
+                        .map_err(|e| format!("获取 ICoreWebView2_2 失败: {e}"))?;
+                    let manager = unsafe { core2.CookieManager() }
+                        .map_err(|e| format!("获取 CookieManager 失败: {e}"))?;
+                    for c in cookies {
+                        let name = HSTRING::from(c.name.as_str());
+                        let value = HSTRING::from(c.value.as_str());
+                        let domain = HSTRING::from(c.domain.as_str());
+                        let path = HSTRING::from(c.path.as_str());
+                        let cookie = unsafe { manager.CreateCookie(&name, &value, &domain, &path) }
+                            .map_err(|e| format!("CreateCookie 失败 ({}): {e}", c.name))?;
+                        unsafe {
+                            cookie
+                                .SetIsHttpOnly(c.http_only)
+                                .and_then(|_| cookie.SetIsSecure(c.secure))
+                                .and_then(|_| {
+                                    if !c.session && c.expires > 0.0 {
+                                        cookie.SetExpires(c.expires)
+                                    } else {
+                                        Ok(())
+                                    }
+                                })
                         }
-                    };
-                    if let Err(e) = unsafe {
-                        cookie.put_IsHttpOnly(BOOL::from(c.http_only))
-                            .and_then(|_| cookie.put_IsSecure(BOOL::from(c.secure)))
-                            .and_then(|_| {
-                                if !c.session && c.expires > 0.0 {
-                                    cookie.put_Expires(c.expires)
-                                } else {
-                                    Ok(())
-                                }
-                            })
-                    } {
-                        let _ = tx.send(Err(format!("设置 Cookie 属性失败 ({}): {e}", c.name)));
-                        return;
+                        .map_err(|e| format!("设置 Cookie 属性失败 ({}): {e}", c.name))?;
+                        unsafe { manager.AddOrUpdateCookie(&cookie) }
+                            .map_err(|e| format!("AddOrUpdateCookie 失败 ({}): {e}", c.name))?;
                     }
-                    let txc = tx_count.clone();
-                    let handler: ICoreWebView2AddOrUpdateCookieCompletedHandler =
-                        AddCookieHandler(RefCell::new(Some(txc))).into();
-                    if let Err(e) = unsafe { manager.AddOrUpdateCookie(&cookie, &handler) } {
-                        let _ = tx.send(Err(format!("AddOrUpdateCookie 失败 ({}): {e}", c.name)));
-                        return;
-                    }
-                }
-                if total == 0 {
-                    let _ = tx.send(Ok(()));
-                }
+                    Ok(())
+                })();
+                let _ = tx.send(result);
             })
             .map_err(|e| format!("with_webview 失败: {e}"))?;
-        // 等待全部 cookie 写入完成
-        for _ in 0..total {
-            match rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err("写入 Cookie 超时".to_string()),
-            }
-        }
-        Ok(())
+        // with_webview 闭包同步执行完毕后才返回，直接取结果即可（AddOrUpdateCookie 为同步调用，无回调等待）
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "写入 Cookie 超时".to_string())?
     }
 }
 
@@ -693,41 +685,66 @@ mod other_cookie {
 }
 
 /// 导出全部 Cookie（含 HttpOnly）—— 供 init.js 在 feature 启用时优先调用
+///
+/// 必须为 async：Windows 的 GetCookies 是异步 COM 调用，完成回调投递到主线程消息泵。
+/// 若在 sync 命令（主线程 = WebView2 事件处理器栈内）等待回调，会构成 WebView2 不支持的
+/// 重入（嵌套消息循环），回调永不到达（实测挂起）。async + spawn_blocking 使等待发生在
+/// blocking 线程，主线程保持空闲并正常投递回调。
 #[cfg(feature = "full-cookie-snapshot")]
 #[tauri::command]
-pub fn dump_all_cookies(webview: Webview) -> Result<Vec<CookieData>, String> {
+pub async fn dump_all_cookies(webview: Webview) -> Result<Vec<CookieData>, String> {
     crate::ensure_deepseek_origin(&webview)?;
 
-    #[cfg(target_os = "windows")]
-    {
-        win_cookie::dump_all_cookies(&webview)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        mac_cookie::dump_all_cookies(&webview)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        other_cookie::dump_all_cookies(&webview)
-    }
+    let wv = webview.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            win_cookie::dump_all_cookies(&wv)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            mac_cookie::dump_all_cookies(&wv)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            other_cookie::dump_all_cookies(&wv)
+        }
+    })
+    .await
+    .map_err(|e| format!("dump_all_cookies 任务失败: {e}"))?
 }
 
 /// 全量恢复 Cookie（含 HttpOnly）—— 供 init.js 在 feature 启用时优先调用
+///
+/// 与 dump_all_cookies 同理必须为 async：
+/// - Windows：AddOrUpdateCookie 虽为同步 COM 调用，但 with_webview 闭包经 spawn_blocking
+///   投递到空闲主线程执行，避免 sync 命令在主线程（事件处理器栈内）直接操作 WebView 的风险。
+/// - macOS：`setCookie_completionHandler` 是异步调用，完成回调投递到主线程消息泵；
+///   若在 sync 命令主线程内等待回调，同样构成"主线程阻塞等回调、回调等主线程泵"的死锁
+///   （实测超时 10s）。async + spawn_blocking 使等待发生在 blocking 线程，主线程保持空闲。
 #[cfg(feature = "full-cookie-snapshot")]
 #[tauri::command]
-pub fn restore_all_cookies(webview: Webview, cookies: Vec<CookieData>) -> Result<(), String> {
+pub async fn restore_all_cookies(
+    webview: Webview,
+    cookies: Vec<CookieData>,
+) -> Result<(), String> {
     crate::ensure_deepseek_origin(&webview)?;
 
-    #[cfg(target_os = "windows")]
-    {
-        win_cookie::restore_all_cookies(&webview, cookies)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        mac_cookie::restore_all_cookies(&webview, cookies)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        other_cookie::restore_all_cookies(&webview, cookies)
-    }
+    let wv = webview.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            win_cookie::restore_all_cookies(&wv, cookies)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            mac_cookie::restore_all_cookies(&wv, cookies)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            other_cookie::restore_all_cookies(&wv, cookies)
+        }
+    })
+    .await
+    .map_err(|e| format!("restore_all_cookies 任务失败: {e}"))?
 }

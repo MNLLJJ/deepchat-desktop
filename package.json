@@ -1,6 +1,6 @@
 {
   "name": "deepchat-desktop",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "chat.deepseek.com 网页端桌面应用（Tauri 2）",
   "private": true,
   "type": "module",

@@ -1,6 +1,6 @@
 [package]
 name = "deepchat-desktop"
-version = "1.0.1"
+version = "1.1.0"
 description = "chat.deepseek.com 网页端桌面应用（Tauri 2）"
 authors = ["MNLLJJ"]
 edition = "2021"
@@ -57,9 +57,9 @@ block2 = { version = "0.6", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows DPAPI 加密（Win32_Security_Cryptography，encrypt-session）：
 # 当前用户上下文加密，无需额外密钥存储。
+# Win32_Foundation：LocalFree（0.61 中位于 Foundation，不再在 System::Memory）。
 windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
-    "Win32_System_Memory",
     "Win32_Foundation",
 ], optional = true }
 # WebView2 COM 绑定（与 tauri/wry 内部同版本 0.38，full-cookie-snapshot）：

@@ -120,13 +120,38 @@ fn hide_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// 恢复并置前主窗口（若曾最小化则先还原，再置顶聚焦）
+/// 恢复并置前主窗口（若曾最小化则先还原，再置顶聚焦）。
+///
+/// 由隐藏态恢复时会刷新页面：WebView 在窗口隐藏期间可能暂停 WebSocket/推送接收，
+/// 重新打开时整页刷新可拉取最新聊天记录（这也是用户从菜单栏唤起后的预期：
+/// 看到的是与服务端一致的最新会话）。
+/// 两个约束：
+/// 1. 仅"此前不可见"时刷新——窗口本来就可见时点击托盘/Dock 不做无谓重载，避免打断当前操作；
+/// 2. 仅远端 DeepSeek 页面刷新——本地兜底页（离线错误页/占位页）重载会再次失败并形成循环。
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        let was_visible = win.is_visible().unwrap_or(false);
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+
+        if !was_visible && is_remote_app_page(&win) {
+            // 页面仍在加载中则不打断（readyState==='loading' 时跳过）
+            let _ = win.eval("if(document.readyState!=='loading'){location.reload()}");
+        }
     }
+}
+
+/// 当前窗口是否停留在 DeepSeek 远端页面（本地兜底页/离线错误页返回 false）
+fn is_remote_app_page(win: &tauri::WebviewWindow) -> bool {
+    win.url()
+        .map(|u| {
+            u.scheme() == "https"
+                && u.host_str()
+                    .map(|h| h == "deepseek.com" || h.ends_with(".deepseek.com"))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 /// 创建菜单栏（托盘）图标与右键菜单。

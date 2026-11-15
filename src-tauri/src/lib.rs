@@ -294,23 +294,19 @@ pub fn run() {
 
             Ok(())
         })
-        // 3) 拦截窗口关闭：关闭按钮 / Cmd+W → 阻止关闭。
-        //    macOS/Linux：隐藏到菜单栏（托盘常驻）；Windows：最小化到任务栏
-        //    （P0-6：完全隐藏会让用户误以为应用退出了，最小化可见且可由托盘/任务栏恢复）
+        // 3) 拦截窗口关闭：关闭按钮 / Cmd+W / Alt+F4 → 阻止关闭并隐藏到菜单栏（托盘常驻）。
+        //    所有平台统一 hide()：
+        //    - Windows 上窗口最小化(minimize)会保留任务栏按钮，导致"任务栏 + 托盘"双图标常驻；
+        //      隐藏(SW_HIDE)使窗口从任务栏移除，仅保留托盘图标，符合"关闭即收进菜单栏"的预期。
+        //    - 恢复路径统一走托盘单击 / 托盘菜单"显示主界面" → show_main_window()
+        //      （unminimize + show + set_focus，兼容曾最小化的窗口状态）。
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = window.minimize();
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = window.hide();
-                }
+                let _ = window.hide();
             }
         })
         .build(tauri::generate_context!())

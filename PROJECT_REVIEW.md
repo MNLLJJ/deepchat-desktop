@@ -40,11 +40,12 @@
 - **体积/性能代价**：~20 行 Rust（每个命令入口校验 `webview.url()` 的 host 以 `deepseek.com` 结尾且为 https）。
 - **开关方式**：无需开关，恒生效。
 
-### P0-6 托盘关闭行为在 Windows 的用户感知（未提交改动）
+### P0-6 托盘关闭行为在 Windows 的用户感知 ✅ 已修正（v1.1.2）
 - **问题**：托盘改动（未提交）拦截 `CloseRequested`，Windows 用户点关闭按钮后窗口隐藏到托盘、进程常驻 —— 用户若看不到托盘图标（Windows 托盘折叠区）会以为应用消失；且无首次提示。
-- **价值**：避免"关闭后找不到应用"的困惑与投诉。
-- **体积/性能代价**：~10 行（首次隐藏时 `show_notification` 或托盘图标气泡提示）。
-- **开关方式**：托盘 feature 内联；提示仅首次（localStorage 或配置文件标记）。
+- **实际落地的实现曾有偏差**：Windows 分支改用了 `window.minimize()`，最小化的窗口在任务栏保留按钮，造成"任务栏 + 托盘"双图标常驻，与"关闭即收进菜单栏"的预期不符。
+- **v1.1.2 修正**：全部平台统一 `window.hide()`（Windows 上 `SW_HIDE` 使窗口从任务栏移除），恢复路径统一为托盘单击 / 托盘菜单"显示主界面" → `show_main_window()`（`unminimize + show + set_focus`）。
+- **仍可选的增强（未实施）**：首次隐藏时弹一次气泡提示"应用已最小化到系统托盘"，需额外通知能力（`tauri-plugin-notification` 或 Win32 `Shell_NotifyIcon`），与"保持轻量"的取舍相冲突，暂不做。
+- **开关方式**：无需开关，恒生效。
 
 ### P1-7 HttpOnly Cookie 无法从文件快照恢复（架构短板）✅ 已实现（feature `full-cookie-snapshot`）
 - **问题**：登录态核心 Cookie 是 HttpOnly，`document.cookie` 读写不到，文件快照层只能兜底非 HttpOnly 部分。Windows 上 WebView2 profile 异常损坏/被清理时登录必失，无法自愈。
